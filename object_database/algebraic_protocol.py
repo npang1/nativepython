@@ -38,8 +38,10 @@ class AlgebraicProtocol(asyncio.Protocol):
                 #for some insane reason, sending a 5 byte message causes the socket to disconnect on the other
                 #side. Sending the 5 bytes in multiple messages does not, nor does sending an extra packet
                 #of zero-length (as we're doing below). I'm mystified.
-                if len(dataToSend) < 6:
-                    dataToSend = longToString(0) + dataToSend
+                if len(dataToSend) < 40:
+                    for _ in range(10):
+                        self.transport.write(longToString(0))
+                    # dataToSend = longToString(0)*9 + dataToSend
                 self.transport.write(dataToSend)
         except:
             self._logger.error("Error in AlgebraicProtocol: %s", traceback.format_exc())
