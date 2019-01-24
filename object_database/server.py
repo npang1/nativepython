@@ -88,6 +88,10 @@ class ConnectedChannel:
                 'index_versions': set()
                 }
 
+        for key, value in msg.writes.items():
+            if value is not None and len(value) > 50000:
+                logging.warn("Writing large key %s (size=%s bytes)", key, len(value))
+
         self.pendingTransactions[guid]['writes'].update({k: msg.writes[k] for k in msg.writes})
         self.pendingTransactions[guid]['set_adds'].update({k: set(msg.set_adds[k]) for k in msg.set_adds if msg.set_adds[k]})
         self.pendingTransactions[guid]['set_removes'].update({k: set(msg.set_removes[k]) for k in msg.set_removes if msg.set_removes[k]})

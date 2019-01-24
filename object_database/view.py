@@ -410,10 +410,18 @@ class View(object):
             raise Exception("Views are static. Please open a transaction.")
 
         if self._writes:
-            def encode(val):
+            def encode(key, val):
                 if isinstance(val, tuple) and len(val) == 2 and isinstance(val[0], type):
+                    serialized_data = serialize(val[0], val[1], self.serializationContext)
+                    if len(serialized_data) > 200000:
+                        self._logger.warn("Serializing key %s with value %s produced %s bytes",
+                            key,
+                            val,
+                            len(serialized_data)
+                            )
+
                     return SerializedDatabaseValue(
-                        serialize(val[0], val[1], self.serializationContext),
+                        serialized_data,
                         {self.serializationContext:val[1]}
                         )
 
@@ -422,7 +430,7 @@ class View(object):
                 else:
                     assert False, "bad write: %s" % val
 
-            writes = {key: encode(v) for key, v in self._writes.items()}
+            writes = {key: encode(key, v) for key, v in self._writes.items()}
             tid = self._transaction_num
 
             if (self._set_adds or self._set_removes) and not self._insistReadsConsistent:
