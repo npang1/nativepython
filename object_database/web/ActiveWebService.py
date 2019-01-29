@@ -1,4 +1,3 @@
-#   Copyright 2018 Braxton Mckee
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -12,7 +11,6 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-import traceback
 import threading
 import logging
 import time
@@ -22,17 +20,18 @@ import sys
 import time
 import argparse
 import traceback
-import datetime
 import os
 import json
 import gevent.socket
 
-from object_database.view import revisionConflictRetry
 from object_database.util import genToken, checkLogLevelValidity
 from object_database import ServiceBase, service_schema, Schema, Indexed, Index, DatabaseObject
-from object_database.web.AuthPlugin import AuthPluginBase, PermissiveAuthPlugin, LdapAuthPlugin
+from object_database.web.AuthPlugin import AuthPluginBase
+from object_database.web.AuthContextPlugin import AuthContextPluginInterface
+from object_database.web.ActiveWebServiceSchema import active_webservice_schema, request_ip_address
 from object_database.web.cells import *
-from typed_python import TupleOf, Float64
+from typed_python import OneOf, TupleOf
+from typed_python.Codebase import Codebase as TypedPythonCodebase
 
 from gevent import pywsgi, sleep
 from gevent.greenlet import Greenlet
@@ -48,7 +47,13 @@ from wtforms import StringField, PasswordField, BooleanField, SubmitField
 from wtforms.validators import DataRequired
 
 
-active_webservice_schema = Schema("core.active_webservice")
+@active_webservice_schema.define
+class AuthPlugin:
+    name = Indexed(str)
+    # auth plugin
+    auth_context_factory = object  # a factory for AuthContextPluginInterface objects
+    auth_plugins = TupleOf(OneOf(None, AuthPluginBase))
+    codebase = OneOf(None, service_schema.Codebase)
 
 
 @active_webservice_schema.define
@@ -60,58 +65,10 @@ class Configuration:
 
     log_level = int
 
-    # auth plugin args
-    auth_type = str
-    authorized_groups = TupleOf(str)
-    auth_hostname = str
-    ldap_base_dn = str
-    ldap_ntlm_domain = str
+    auth_plugin = OneOf(None, AuthPlugin)
 
     # HTML template rendering args
     company_name = str
-
-
-USER_LOGIN_DURATION = 24 * 60 * 60  # 24 hours
-
-@active_webservice_schema.define
-class User:
-    username = Indexed(str)
-    login_expiration = Float64()
-
-    def login(self):
-        self.login_expiration = time.time() + USER_LOGIN_DURATION
-
-    def logout(self):
-        self.login_expiration = 0.0
-
-
-class UserWrapper:
-    #  must be called with an open view of the user argument
-    @staticmethod
-    def makeFromUser(user):
-        if user is None:
-            return None
-        else:
-            return UserWrapper(user.username, user.login_expiration)
-
-    def __init__(self, username, login_expiration):
-        self.username = username
-        self.login_expiration = login_expiration
-
-    @property
-    def is_authenticated(self):
-        return True if time.time() < self.login_expiration else False
-
-    @property
-    def is_active(self):
-        return True
-
-    @property
-    def is_anonymous(self):
-        return False
-
-    def get_id(self):
-        return self.username  # must return unicode by Python 3 strings are unicode
 
 
 class LoginForm(FlaskForm):
@@ -127,29 +84,22 @@ class ActiveWebService(ServiceBase):
         self._logger = logging.getLogger(__name__)
 
     @staticmethod
-    def initialize_auth_plugin(auth_type, authorized_groups=None, hostname=None, ldap_base_dn=None, ldap_ntlm_domain=None):
-        if auth_type == "NONE":
-            return None
-        elif auth_type == "PERMISSIVE":
-            return PermissiveAuthPlugin()
-        elif auth_type == "FORBIDDEN":
-            return AuthPluginBase()
-        elif auth_type == "LDAP":
-            if not hostname:
-                raise Exception("Missing required argument for LDAP: --hostname")
+    def setAuthPlugin(db, serviceObject, authPluginContextFactory, authPlugins, codebase=None):
+        """Subclasses should take the remaining args from the commandline and configure using them"""
+        db.subscribeToType(Configuration)
+        db.subscribeToType(AuthPlugin)
 
-            if not ldap_base_dn:
-                raise Exception("Missing required argument for LDAP: --base-dn")
-
-            return LdapAuthPlugin(
-                hostname=hostname,
-                base_dn=ldap_base_dn,
-                ntlm_domain=ldap_ntlm_domain,
-                authorized_groups=authorized_groups
+        with db.transaction():
+            c = Configuration.lookupAny(service=serviceObject)
+            if not c:
+                c = Configuration(service=serviceObject)
+            auth_plugin = AuthPlugin(
+                name="an auth plugin",
+                auth_context_factory=authPluginContextFactory,
+                auth_plugins=TupleOf(OneOf(None, AuthPluginBase))(authPlugins),
+                codebase=codebase
             )
-        else:
-            raise Exception("Unkown auth-type: {}".format(auth_type))
-
+            c.auth_plugin = auth_plugin
 
     @staticmethod
     def configureFromCommandline(db, serviceObject, args):
@@ -164,24 +114,11 @@ class ActiveWebService(ServiceBase):
             parser = argparse.ArgumentParser("Configure a webservice")
             parser.add_argument("--hostname", type=str)
             parser.add_argument("--port", type=int)
-
+            # optional arguments
             parser.add_argument("--log-level", type=str, required=False, default="INFO")
-
-            parser.add_argument("--auth", type=str, required=False, default="LDAP")
-            parser.add_argument("--authorized-groups", nargs='+', type=str, required=False, default=())
-            parser.add_argument("--auth-hostname", type=str, required=False, default="")
-            parser.add_argument("--ldap-base-dn", type=str, required=False, default="")
-            parser.add_argument("--ldap-ntlm-domain", type=str, required=False, default="")
-
             parser.add_argument("--company-name", type=str, required=False, default="")
 
             parsedArgs = parser.parse_args(args)
-
-            VALID_AUTH_TYPES = ["NONE", "LDAP", "PERMISSIVE", "FORBIDDEN"]
-            auth_type = parsedArgs.auth.upper()
-            if  auth_type not in VALID_AUTH_TYPES:
-                raise Exception("invalid --auth value: {auth}. Must be one of {options}"
-                    .format(auth=parsedArgs.auth, options=VALID_AUTH_TYPES))
 
             level_name = parsedArgs.log_level.upper()
             checkLogLevelValidity(level_name)
@@ -190,18 +127,11 @@ class ActiveWebService(ServiceBase):
             c.hostname = parsedArgs.hostname
 
             c.log_level = logging.getLevelName(level_name)
-
-            c.auth_type = auth_type
-            c.authorized_groups = TupleOf(str)(parsedArgs.authorized_groups)
-            c.auth_hostname = parsedArgs.auth_hostname
-            c.ldap_base_dn = parsedArgs.ldap_base_dn
-            c.ldap_ntlm_domain = parsedArgs.ldap_ntlm_domain
-
             c.company_name = parsedArgs.company_name
 
     def initialize(self):
         self.db.subscribeToType(Configuration)
-        self.db.subscribeToType(User)
+        self.db.subscribeToType(AuthPlugin)
         self.db.subscribeToSchema(service_schema)
 
         with self.db.transaction():
@@ -210,35 +140,35 @@ class ActiveWebService(ServiceBase):
             self.sockets = Sockets(self.app)
             self.configureApp()
         self.login_manager = LoginManager(self.app)
-        self.load_user = self.login_manager.user_loader(self.load_user)
         self.login_manager.login_view = 'login'
-
-    def load_user(self, username):
-        with self.db.view():
-            return UserWrapper.makeFromUser(User.lookupAny(username=username))
-
 
     def doWork(self, shouldStop):
         self._logger.info("Configuring ActiveWebService")
-        with self.db.view():
+        with self.db.view() as view:
             config = Configuration.lookupAny(service=self.serviceObject)
             assert config, "No configuration available."
             self._logger.setLevel(config.log_level)
             host, port = config.hostname, config.port
 
-            self.authorized_groups = config.authorized_groups
+            auth_plugin = config.auth_plugin
+
+            codebase = auth_plugin.codebase
+            if codebase is None:
+                ser_ctx = TypedPythonCodebase.coreSerializationContext()
+            else:
+                ser_ctx = codebase.instantiate().serializationContext
+            view.setSerializationContext(ser_ctx)
+
+            self.auth_plugin = auth_plugin.auth_context_factory(self.db, auth_plugin.auth_plugins)
+
+            # register `load_user` method with login_manager
+            self.auth_plugin.load_user = self.login_manager.user_loader(self.auth_plugin.load_user)
+
+            authorized_groups = self.auth_plugin.authorized_groups
 
             self.authorized_groups_text = "All"
-            if self.authorized_groups:
-                self.authorized_groups_text = ", ".join(self.authorized_groups)
-
-            self.auth_plugin = self.initialize_auth_plugin(
-                config.auth_type,
-                authorized_groups=config.authorized_groups,
-                hostname=config.auth_hostname,
-                ldap_base_dn=config.ldap_base_dn,
-                ldap_ntlm_domain=config.ldap_ntlm_domain
-            )
+            if authorized_groups:
+                self.authorized_groups_text = ", ".join(authorized_groups)
 
             self.company_name = config.company_name
 
@@ -260,48 +190,45 @@ class ActiveWebService(ServiceBase):
         self.app.add_url_rule('/logout', endpoint=None, view_func=self.logout)
         self.sockets.add_url_rule('/socket/<path:path>', None, self.mainSocket)
 
-    @revisionConflictRetry
-    def login_user(self, username):
-        with self.db.transaction():
-            users = User.lookupAll(username=username)
+    def authenticate(self, username, password) -> str:
+        """ Attempts to authenticate with given username and password.
 
-            if len(users) == 0:
-                user = User(username=username)
-            elif len(users) == 1:
-                user = users[0]
-            elif len(users) > 1:
-                raise Exception("multiple users found with username={}".format(username))
-            else:
-                raise Exception("This should never happen: len(users)={}".format(len(users)))
-            user.login()
-            login_user(UserWrapper.makeFromUser(user))
+            Returns:
+            --------
+            str
+                "" if no error occurred and an error message otherwise
+        """
+        error = self.auth_plugin.authenticate(username, password, login_ip=request_ip_address())
+        if error:
+            return error
+
+        user = self.auth_plugin.load_user(username)
+        login_user(user)
+        return error
 
     def login(self):
         if current_user.is_authenticated:
             return redirect('/')
 
-        if self.auth_plugin is None:
-            self.login_user('anonymous')
+        if self.auth_plugin.bypassAuth:
+            error = self.authenticate('anonymous', 'fake-pass')
+            assert not error, error
             return redirect('/')
-
         form = LoginForm()
 
         if form.validate_on_submit():
             username = form.username.data
             password = form.password.data
-            if not self.auth_plugin.authenticate(username, password):
-                flash(
-                    'Invalid username or password or not a member of an '
-                    'authorized group. Please try again.',
-                    'danger')
+
+            error = self.authenticate(username, password)
+            if error:
+                flash(error, 'danger')
                 return render_template(
                     'login.html',
                     form=form,
                     title=self.company_name,
                     authorized_groups_text=self.authorized_groups_text
                 )
-
-            self.login_user(username)
 
             return redirect('/')
 
@@ -316,6 +243,7 @@ class ActiveWebService(ServiceBase):
         )
 
     def logout(self):
+        # FIXME: also call logout of auth_plugin
         logout_user()
         return redirect('/')
 
@@ -397,6 +325,7 @@ class ActiveWebService(ServiceBase):
         if len(path) and path[0] == 'services':
             if len(path) == 1:
                 return self.mainDisplay()
+
             serviceObj = service_schema.Service.lookupAny(name=path[1])
 
             if serviceObj is None:
@@ -439,8 +368,7 @@ class ActiveWebService(ServiceBase):
 
 
     def addMainBar(self, display):
-        with self.db.view():
-            current_username = current_user.username
+        current_username = current_user.username
 
         return (
             HeaderBar(
@@ -513,7 +441,7 @@ class ActiveWebService(ServiceBase):
                 t0 = time.time()
                 messages = cells.renderMessages()
 
-                user = self.load_user(current_user.username)
+                user = self.auth_plugin.load_user(current_user.username)
                 if not user.is_authenticated:
                     ws.close()
                     return
