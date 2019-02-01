@@ -47,6 +47,17 @@ from wtforms import StringField, PasswordField, BooleanField, SubmitField
 from wtforms.validators import DataRequired
 
 
+def redirect_next_or_index():
+    dest = request.args.get('next')
+    # is_safe_url should check if the url is safe for redirects.
+    # See http://flask.pocoo.org/snippets/62/ for an example.
+    # if not is_safe_url(dest):
+        # print("ERROR: not safe for redirect:", dest)
+        # return flask.abort(400)
+
+    return redirect(dest or url_for('index'))
+
+
 @active_webservice_schema.define
 class AuthPlugin:
     name = Indexed(str)
@@ -182,7 +193,7 @@ class ActiveWebService(ServiceBase):
         instanceName = self.serviceObject.name
         self.app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or genToken()
 
-        self.app.add_url_rule('/', endpoint=None, view_func=lambda: redirect("/services"))
+        self.app.add_url_rule('/', endpoint='index', view_func=lambda: redirect("/services"))
         self.app.add_url_rule('/content/<path:path>', endpoint=None, view_func=self.sendContent)
         self.app.add_url_rule('/services', endpoint=None, view_func=self.sendPage)
         self.app.add_url_rule('/services/<path:path>', endpoint=None, view_func=self.sendPage)
@@ -196,9 +207,13 @@ class ActiveWebService(ServiceBase):
             Returns:
             --------
             str
-                "" if no error occurred and an error message otherwise
+                "" (empty string) if no error occurred and an error message otherwise
         """
-        error = self.auth_plugin.authenticate(username, password, login_ip=request_ip_address())
+        login_ip = request_ip_address()
+        self._logger.info("User '{username}' trying to authenticate from IP {login_ip}".
+            format(username=username, login_ip=login_ip)
+        )
+        error = self.auth_plugin.authenticate(username, password, login_ip=login_ip)
         if error:
             return error
 
@@ -208,12 +223,12 @@ class ActiveWebService(ServiceBase):
 
     def login(self):
         if current_user.is_authenticated:
-            return redirect('/')
+            return redirect_next_or_index()
 
         if self.auth_plugin.bypassAuth:
             error = self.authenticate('anonymous', 'fake-pass')
             assert not error, error
-            return redirect('/')
+            return redirect_next_or_index()
         form = LoginForm()
 
         if form.validate_on_submit():
@@ -230,7 +245,7 @@ class ActiveWebService(ServiceBase):
                     authorized_groups_text=self.authorized_groups_text
                 )
 
-            return redirect('/')
+            return redirect_next_or_index()
 
         if form.errors:
             flash(form.errors, 'danger')
@@ -243,7 +258,8 @@ class ActiveWebService(ServiceBase):
         )
 
     def logout(self):
-        # FIXME: also call logout of auth_plugin
+        current_username = current_user.username
+        self.auth_plugin.logout_user(current_username)
         logout_user()
         return redirect('/')
 
