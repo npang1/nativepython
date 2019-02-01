@@ -22,6 +22,7 @@ import argparse
 import traceback
 import os
 import json
+import jwt
 import gevent.socket
 
 from object_database.util import genToken, checkLogLevelValidity
@@ -37,7 +38,7 @@ from gevent import pywsgi, sleep
 from gevent.greenlet import Greenlet
 from geventwebsocket.handler import WebSocketHandler
 
-from flask import Flask, send_from_directory, redirect, url_for, request, render_template, flash
+from flask import Flask, send_from_directory, redirect, url_for, request, render_template, flash, jsonify, make_response
 from flask_wtf import FlaskForm
 from flask_sockets import Sockets
 from flask_cors import CORS
@@ -45,6 +46,26 @@ from flask_login import LoginManager, current_user, login_user, logout_user, log
 
 from wtforms import StringField, PasswordField, BooleanField, SubmitField
 from wtforms.validators import DataRequired
+
+
+from urllib.parse import urlencode, parse_qs, urlsplit, urlunsplit
+
+
+def set_query_parameter(url, param_name, param_value):
+    """Given a URL, set or replace a query parameter and return the
+    modified URL.
+
+    >>> set_query_parameter('http://example.com?foo=bar&biz=baz', 'foo', 'stuff')
+    'http://example.com?foo=stuff&biz=baz'
+
+    """
+    scheme, netloc, path, query_string, fragment = urlsplit(url)
+    query_params = parse_qs(query_string)
+
+    query_params[param_name] = [param_value]
+    new_query_string = urlencode(query_params, doseq=True)
+
+    return urlunsplit((scheme, netloc, path, new_query_string, fragment))
 
 
 def redirect_next_or_index():
@@ -198,6 +219,7 @@ class ActiveWebService(ServiceBase):
         self.app.add_url_rule('/services', endpoint=None, view_func=self.sendPage)
         self.app.add_url_rule('/services/<path:path>', endpoint=None, view_func=self.sendPage)
         self.app.add_url_rule('/login', endpoint=None, view_func=self.login, methods=['GET', 'POST'])
+        self.app.add_url_rule('/authorized', endpoint=None, view_func=self.authorized)
         self.app.add_url_rule('/logout', endpoint=None, view_func=self.logout)
         self.sockets.add_url_rule('/socket/<path:path>', None, self.mainSocket)
 
@@ -229,33 +251,78 @@ class ActiveWebService(ServiceBase):
             error = self.authenticate('anonymous', 'fake-pass')
             assert not error, error
             return redirect_next_or_index()
-        form = LoginForm()
 
-        if form.validate_on_submit():
-            username = form.username.data
-            password = form.password.data
+        if request.method == 'GET':
+            # redirect to AUTH service
+            url = set_query_parameter(
+                "http://localhost:5000/login",
+                'redirect_uri',
+                url_for('authorized', _external=True)
+            )
 
-            error = self.authenticate(username, password)
-            if error:
-                flash(error, 'danger')
-                return render_template(
-                    'login.html',
-                    form=form,
-                    title=self.company_name,
-                    authorized_groups_text=self.authorized_groups_text
-                )
+            url = set_query_parameter(
+                url,
+                'authorized_groups_text',
+                self.authorized_groups_text
+            )
+            print("JUMPING TO {} for login".format(url))
+            return redirect(url)
 
-            return redirect_next_or_index()
+    # @app.route('/authorized')
+    def authorized(self):
+        token = request.args.get('login_token')
+        try:
+            payload = jwt.decode(token, 'secret') # this could throw for various reasons (wrong algo, wrong secret, expired)
+        except Exception as e:
+            self._logger.exception(e)
+            # TODO -> redirect to /login
 
-        if form.errors:
-            flash(form.errors, 'danger')
+        username = payload['sub']
+        authorized_groups = payload.get('grps', None)
+        bloomberg_uuid = payload.get('cmnt', None)
+        login_ip = payload.get('lid', None)
+        self.auth_plugin._login_user(username, login_ip)
+        user = self.auth_plugin.load_user(username)
+        login_user(user)
+        # return redirect_next_or_index()
+        return make_response(jsonify(payload))
 
-        return render_template(
-            'login.html',
-            form=form,
-            title=self.company_name,
-            authorized_groups_text=self.authorized_groups_text
-        )
+
+    # def login(self):
+    #     if current_user.is_authenticated:
+    #         return redirect_next_or_index()
+
+    #     if self.auth_plugin.bypassAuth:
+    #         error = self.authenticate('anonymous', 'fake-pass')
+    #         assert not error, error
+    #         return redirect_next_or_index()
+    #     form = LoginForm()
+
+    #     if form.validate_on_submit():
+    #         username = form.username.data
+    #         password = form.password.data
+
+    #         error = self.authenticate(username, password)
+    #         if error:
+    #             flash(error, 'danger')
+    #             return render_template(
+    #                 'login.html',
+    #                 form=form,
+    #                 title=self.company_name,
+    #                 authorized_groups_text=self.authorized_groups_text
+    #             )
+
+    #         return redirect_next_or_index()
+
+    #     if form.errors:
+    #         flash(form.errors, 'danger')
+
+    #     return render_template(
+    #         'login.html',
+    #         form=form,
+    #         title=self.company_name,
+    #         authorized_groups_text=self.authorized_groups_text
+    #     )
 
     def logout(self):
         current_username = current_user.username
