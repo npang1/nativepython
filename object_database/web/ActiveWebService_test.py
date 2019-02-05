@@ -46,10 +46,12 @@ class ActiveWebServiceTest(unittest.TestCase):
         cls.base_url = "http://localhost:{port}".format(port=WEB_SERVER_PORT)
         configureLogging("aws_test")
         cls._logger = logging.getLogger(__name__)
+        cls.login_config = dict(company_name="Testing Company")
 
     def configurableSetUp(self, hostname='localhost',
                           login_plugin_factory=LoginIpPlugin,
-                          auth_plugins=(None), company_name=None, module=None):
+                          login_config=None,
+                          auth_plugins=(None), module=None):
 
         self.token = genToken()
         log_level = self._logger.getEffectiveLevel()
@@ -83,9 +85,6 @@ class ActiveWebServiceTest(unittest.TestCase):
 
             optional_args = []
 
-            if company_name:
-                optional_args.extend(['--company-name', company_name])
-
             ActiveWebService.configureFromCommandline(
                 self.database,
                 service,
@@ -96,12 +95,16 @@ class ActiveWebServiceTest(unittest.TestCase):
                 ] + optional_args
             )
 
+            if login_config is None:
+                login_config = self.login_config
+
             ActiveWebService.setLoginPlugin(
                 self.database,
                 service,
                 login_plugin_factory,
                 auth_plugins,
-                codebase
+                codebase=codebase,
+                config=login_config
             )
 
             with self.database.transaction():

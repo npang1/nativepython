@@ -32,7 +32,7 @@ from object_database.web.LoginPlugin import authorized_groups_text
 from object_database.web.ActiveWebServiceSchema import active_webservice_schema
 from object_database.web.flask_util import request_ip_address
 from object_database.web.cells import *
-from typed_python import OneOf, TupleOf
+from typed_python import OneOf, TupleOf, ConstDict
 from typed_python.Codebase import Codebase as TypedPythonCodebase
 
 from gevent import pywsgi, sleep
@@ -63,6 +63,7 @@ class LoginPlugin:
     login_plugin_factory = object  # a factory for LoginPluginInterface objects
     auth_plugins = TupleOf(OneOf(None, AuthPluginBase))
     codebase = OneOf(None, service_schema.Codebase)
+    config = ConstDict(str, str)
 
 
 @active_webservice_schema.define
@@ -75,9 +76,6 @@ class Configuration:
     log_level = int
 
     login_plugin = OneOf(None, LoginPlugin)
-
-    # HTML template rendering args
-    company_name = str
 
 
 class ActiveWebService(ServiceBase):
@@ -100,10 +98,12 @@ class ActiveWebService(ServiceBase):
             c.auth_type = "NONE"
 
     @staticmethod
-    def setLoginPlugin(db, serviceObject, loginPluginFactory, authPlugins, codebase=None):
+    def setLoginPlugin(db, serviceObject, loginPluginFactory, authPlugins, codebase=None, config=None):
         """Subclasses should take the remaining args from the commandline and configure using them"""
         db.subscribeToType(Configuration)
         db.subscribeToType(LoginPlugin)
+
+        config = config or {}
 
         with db.transaction():
             c = Configuration.lookupAny(service=serviceObject)
@@ -113,7 +113,8 @@ class ActiveWebService(ServiceBase):
                 name="an auth plugin",
                 login_plugin_factory=loginPluginFactory,
                 auth_plugins=TupleOf(OneOf(None, AuthPluginBase))(authPlugins),
-                codebase=codebase
+                codebase=codebase,
+                config=config
             )
             c.login_plugin = login_plugin
 
@@ -132,7 +133,6 @@ class ActiveWebService(ServiceBase):
             parser.add_argument("--port", type=int)
             # optional arguments
             parser.add_argument("--log-level", type=str, required=False, default="INFO")
-            parser.add_argument("--company-name", type=str, required=False, default="")
 
             parsedArgs = parser.parse_args(args)
 
@@ -143,7 +143,6 @@ class ActiveWebService(ServiceBase):
             c.hostname = parsedArgs.hostname
 
             c.log_level = logging.getLevelName(level_name)
-            c.company_name = parsedArgs.company_name
 
     def initialize(self):
         self.db.subscribeToType(Configuration)
@@ -175,15 +174,16 @@ class ActiveWebService(ServiceBase):
                 ser_ctx = codebase.instantiate().serializationContext
             view.setSerializationContext(ser_ctx)
 
-            self.login_plugin = login_config.login_plugin_factory(self.db, login_config.auth_plugins)
+            self.login_plugin = login_config.login_plugin_factory(
+                self.db, login_config.auth_plugins, login_config.config
+            )
 
             # register `load_user` method with login_manager
             self.login_plugin.load_user = self.login_manager.user_loader(self.login_plugin.load_user)
 
             self.authorized_groups_text = authorized_groups_text(self.login_plugin.authorized_groups)
-            self.company_name = config.company_name
 
-            self.login_plugin.init_app(self.app, self.company_name)
+            self.login_plugin.init_app(self.app)
 
         self._logger.info("ActiveWebService listening on %s:%s", host, port)
 

@@ -74,10 +74,10 @@ class LoginPluginInterface:
         The derived class will register `/login` and `/logout` endpoints with
         the Flask app and it will provide a load_user method.
     """
-    def __init__(self, object_db, auth_plugins):
+    def __init__(self, object_db, auth_plugins, config=None):
         raise NotImplementedError("derived class must implement this method")
 
-    def init_app(self, flask_app, **config):
+    def init_app(self, flask_app):
         raise NotImplementedError("derived class must implement this method")
 
     def getSerializationContext(self):
@@ -89,6 +89,18 @@ class LoginPluginInterface:
     @property
     def authorized_groups(self):
         raise NotImplementedError("derived class must implement this method")
+
+    def init_config(self, config, required_keys=None):
+        if config is None:
+            config = {}
+
+        if required_keys:
+            for key in required_keys:
+                if key not in config:
+                    raise Exception("{cls} missing configuration parameter '{key}'"
+                        .format(cls=self.__class__.__name__, key=key)
+                    )
+                setattr(self, '_' + key, config[key])
 
 
 class LoginForm(FlaskForm):
@@ -121,30 +133,38 @@ def authorized_groups_text(authorized_groups, default_text='All') -> str:
     if authorized_groups:
         return ', '.join(authorized_groups)
 
+
 class LoginIpPlugin(LoginPluginInterface):
-    def __init__(self, db, auth_plugins):
+    def __init__(self, db, auth_plugins, config=None):
         self._logger = logging.getLogger(__name__)
         self._db = db
         self._db.subscribeToType(User)
 
-        assert len(auth_plugins) == 1
+        if len(auth_plugins) != 1:
+            raise Exception(
+                "LoginIpPlugin requires exactly 1 auth_plugin but {} were given."
+                .format(len(auth_plugins))
+            )
+
         self._auth_plugins = auth_plugins
         self._auth_plugin = auth_plugins[0]
 
-        authorized_groups = (self._auth_plugin.authorized_groups
-            if self._auth_plugin is not None
-            else None
-        )
-        self._authorized_groups_text = authorized_groups_text(authorized_groups)
+        self._authorized_groups_text = authorized_groups_text(self.authorized_groups)
 
-    def init_app(self, flask_app, company_name):
-        self._company_name = company_name
+        required_keys = ['company_name']
+        self.init_config(config or {}, required_keys=required_keys)
+
+    def init_app(self, flask_app):
         flask_app.add_url_rule('/login', endpoint=None, view_func=self.login, methods=['GET', 'POST'])
         flask_app.add_url_rule('/logout', endpoint=None, view_func=self.logout)
 
     @property
     def authorized_groups_text(self):
         return self._authorized_groups_text
+
+    @property
+    def authorized_groups(self):
+        return self._auth_plugin.authorized_groups if self._auth_plugin is not None else None
 
     def _authenticate(self, username, password) -> str:
         """ Attempts to authenticate with given username and password.
@@ -214,10 +234,6 @@ class LoginIpPlugin(LoginPluginInterface):
     @property
     def bypassAuth(self):
         return self._auth_plugin is None
-
-    @property
-    def authorized_groups(self):
-        return self._auth_plugin.authorized_groups if self._auth_plugin is not None else None
 
     def _login_user(self, username, login_ip):
         self._login_objdb_user(username, login_ip)
