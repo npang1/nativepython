@@ -39,7 +39,17 @@ from gevent import pywsgi, sleep
 from gevent.greenlet import Greenlet
 from geventwebsocket.handler import WebSocketHandler
 
-from flask import Flask, send_from_directory, redirect, url_for, request, render_template, flash
+from flask import (
+    flash,
+    Flask,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
 from flask_sockets import Sockets
 from flask_cors import CORS
 from flask_login import LoginManager, current_user, login_user, logout_user, login_required
@@ -199,7 +209,11 @@ class ActiveWebService(ServiceBase):
         self.app.add_url_rule('/content/<path:path>', endpoint=None, view_func=self.sendContent)
         self.app.add_url_rule('/services', endpoint=None, view_func=self.sendPage)
         self.app.add_url_rule('/services/<path:path>', endpoint=None, view_func=self.sendPage)
+        self.app.add_url_rule('/status', view_func=self.statusPage)
         self.sockets.add_url_rule('/socket/<path:path>', None, self.mainSocket)
+
+    def statusPage(self):
+        return make_response(jsonify("STATUS: service is up"))
 
     @login_required
     def sendPage(self, path=None):

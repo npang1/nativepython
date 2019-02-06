@@ -43,7 +43,6 @@ class ActiveWebServiceTest(unittest.TestCase):
     def setUpClass(cls):
         cls.cleanupFn = lambda error=None: None
 
-        cls.base_url = "http://localhost:{port}".format(port=WEB_SERVER_PORT)
         configureLogging("aws_test")
         cls._logger = logging.getLogger(__name__)
         cls.login_config = dict(company_name="Testing Company")
@@ -53,6 +52,7 @@ class ActiveWebServiceTest(unittest.TestCase):
                           login_config=None,
                           auth_plugins=(None), module=None):
 
+        self.base_url = "http://{host}:{port}".format(host=hostname, port=WEB_SERVER_PORT)
         self.token = genToken()
         log_level = self._logger.getEffectiveLevel()
         loglevel_name = logging.getLevelName(log_level)
@@ -83,8 +83,6 @@ class ActiveWebServiceTest(unittest.TestCase):
             with self.database.transaction():
                 service = ServiceManager.createOrUpdateService(ActiveWebService, "ActiveWebService", target_count=0)
 
-            optional_args = []
-
             ActiveWebService.configureFromCommandline(
                 self.database,
                 service,
@@ -92,7 +90,7 @@ class ActiveWebServiceTest(unittest.TestCase):
                     '--port', str(WEB_SERVER_PORT),
                     '--host', hostname,
                     '--log-level', loglevel_name,
-                ] + optional_args
+                ]
             )
 
             if login_config is None:
@@ -120,7 +118,7 @@ class ActiveWebServiceTest(unittest.TestCase):
 
         while time.time() - t0 < timeout:
             try:
-                res = requests.get(self.base_url + "/login")
+                res = requests.get(self.base_url + "/status")
                 return
             except Exception:
                 time.sleep(.5)
