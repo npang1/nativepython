@@ -50,7 +50,8 @@ class ActiveWebServiceTest(unittest.TestCase):
     def configurableSetUp(self, hostname='localhost',
                           login_plugin_factory=LoginIpPlugin,
                           login_config=None,
-                          auth_plugins=(None), module=None):
+                          auth_plugins=(None), module=None,
+                          db_init_fun=None):
 
         self.base_url = "http://{host}:{port}".format(host=hostname, port=WEB_SERVER_PORT)
         self.token = genToken()
@@ -68,6 +69,8 @@ class ActiveWebServiceTest(unittest.TestCase):
         try:
             self.database = connect(hostname, DATABASE_SERVER_PORT, self.token, retry=True)
             self.database.subscribeToSchema(core_schema, service_schema, active_webservice_schema)
+            if db_init_fun is not None:
+                db_init_fun(self.database)
 
             codebase = None
             if module is not None and not module.__name__.startswith("object_database."):
