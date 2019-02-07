@@ -185,8 +185,6 @@ class LoginIpPlugin(LoginPluginInterface):
                 return error
 
         self._login_user(username, login_ip)
-        user = self.load_user(username)
-        login_user(user)
         return ''
 
     def login(self):
