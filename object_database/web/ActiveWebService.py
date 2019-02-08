@@ -25,7 +25,7 @@ import json
 import gevent.socket
 import gevent.queue
 
-from object_database.util import genToken, checkLogLevelValidity
+from object_database.util import genToken, checkLogLevelValidity, generateSslContext
 from object_database import ServiceBase, service_schema, Schema, Indexed, Index, DatabaseObject
 from object_database.web.AuthPlugin import AuthPluginBase
 from object_database.web.LoginPlugin import authorized_groups_text
@@ -55,17 +55,6 @@ from flask_cors import CORS
 from flask_login import LoginManager, current_user, login_user, logout_user, login_required
 
 
-def redirect_next_or_index():
-    dest = request.args.get('next')
-    # is_safe_url should check if the url is safe for redirects.
-    # See http://flask.pocoo.org/snippets/62/ for an example.
-    # if not is_safe_url(dest):
-        # print("ERROR: not safe for redirect:", dest)
-        # return flask.abort(400)
-
-    return redirect(dest or url_for('index'))
-
-
 @active_webservice_schema.define
 class LoginPlugin:
     name = Indexed(str)
@@ -84,6 +73,7 @@ class Configuration:
     hostname = str
 
     log_level = int
+    ssl = bool
 
     login_plugin = OneOf(None, LoginPlugin)
 
@@ -143,6 +133,7 @@ class ActiveWebService(ServiceBase):
             parser.add_argument("--port", type=int)
             # optional arguments
             parser.add_argument("--log-level", type=str, required=False, default="INFO")
+            parser.add_argument("--ssl", action='store_true', required=False, default=False)
 
             parsedArgs = parser.parse_args(args)
 
@@ -153,6 +144,7 @@ class ActiveWebService(ServiceBase):
             c.hostname = parsedArgs.hostname
 
             c.log_level = logging.getLevelName(level_name)
+            c.ssl = parsedArgs.ssl
 
     def initialize(self):
         self.db.subscribeToType(Configuration)
@@ -174,6 +166,7 @@ class ActiveWebService(ServiceBase):
             assert config, "No configuration available."
             self._logger.setLevel(config.log_level)
             host, port = config.hostname, config.port
+            ssl_ctx = generateSslContext() if config.ssl else None
 
             login_config = config.login_plugin
 
@@ -197,7 +190,15 @@ class ActiveWebService(ServiceBase):
 
         self._logger.info("ActiveWebService listening on %s:%s", host, port)
 
-        server = pywsgi.WSGIServer((host, port), self.app, handler_class=WebSocketHandler)
+        kwargs = dict(handler_class=WebSocketHandler)
+        if ssl_ctx is not None:
+            kwargs['ssl_context'] = ssl_ctx
+
+        server = pywsgi.WSGIServer(
+            (host, port),
+            self.app,
+            **kwargs
+        )
 
         server.serve_forever()
 

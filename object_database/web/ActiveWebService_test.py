@@ -51,9 +51,13 @@ class ActiveWebServiceTest(unittest.TestCase):
                           login_plugin_factory=LoginIpPlugin,
                           login_config=None,
                           auth_plugins=(None), module=None,
-                          db_init_fun=None):
+                          db_init_fun=None, ssl=False):
 
-        self.base_url = "http://{host}:{port}".format(host=hostname, port=WEB_SERVER_PORT)
+        self.base_url = "{protocol}://{host}:{port}".format(
+            protocol='https' if ssl else 'http',
+            host=hostname,
+            port=WEB_SERVER_PORT
+        )
         self.token = genToken()
         log_level = self._logger.getEffectiveLevel()
         loglevel_name = logging.getLevelName(log_level)
@@ -86,6 +90,10 @@ class ActiveWebServiceTest(unittest.TestCase):
             with self.database.transaction():
                 service = ServiceManager.createOrUpdateService(ActiveWebService, "ActiveWebService", target_count=0)
 
+            optional_args = []
+            if ssl:
+                optional_args.extend(['--ssl'])
+
             ActiveWebService.configureFromCommandline(
                 self.database,
                 service,
@@ -93,7 +101,7 @@ class ActiveWebServiceTest(unittest.TestCase):
                     '--port', str(WEB_SERVER_PORT),
                     '--host', hostname,
                     '--log-level', loglevel_name,
-                ]
+                ] + optional_args
             )
 
             if login_config is None:
@@ -121,9 +129,10 @@ class ActiveWebServiceTest(unittest.TestCase):
 
         while time.time() - t0 < timeout:
             try:
-                res = requests.get(self.base_url + "/status")
+                res = requests.get(self.base_url + "/status", verify=False)
                 return
-            except Exception:
+            except Exception as e:
+                self._logger.info(repr(e))
                 time.sleep(.5)
 
         raise Exception("Webservice failed to come up after {} seconds.".format(timeout))
@@ -159,6 +168,20 @@ class ActiveWebServiceTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
 
         res = client.get(url)
+        self.assertFalse(res.history)  # second time around we will NOT get redirects
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.url, url)
+
+    def test_web_service_no_auth_ssl(self):
+        self.configurableSetUp(auth_plugins=[None], ssl=True)
+        url = self.base_url + "/content/object_database.css"
+        client = requests.Session()
+
+        res = client.get(url, verify=False)
+        self.assertTrue(res.history)  # first time around we WILL get redirects
+        self.assertEqual(res.status_code, 200)
+
+        res = client.get(url, verify=False)
         self.assertFalse(res.history)  # second time around we will NOT get redirects
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.url, url)
